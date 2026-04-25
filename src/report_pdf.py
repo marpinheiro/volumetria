@@ -25,6 +25,47 @@ from src.parser import (
 )
 
 # ---------------------------------------------------------------------------
+# Filesystems considerados relevantes (datafiles, backups, archives, FRA, DG)
+# Excluímos sistema operacional, /var, /var/log, /tmp, /home, /boot, /boot/efi.
+# ---------------------------------------------------------------------------
+_FS_IGNORE_EXACT = {
+    "/", "/boot", "/boot/efi", "/home", "/tmp", "/var",
+    "/var/log", "/var/log/audit", "/var/cache", "/var/lib", "/var/tmp",
+    "/dev", "/dev/shm", "/run", "/sys", "/proc", "/srv", "/opt",
+}
+_FS_IGNORE_PREFIX = ("/var/", "/boot/", "/run/", "/sys/", "/proc/", "/dev/")
+_FS_KEEP_HINTS = (
+    "oracle", "u01", "u02", "u03", "u04", "u05",
+    "data", "datafile", "arch", "archive", "fra",
+    "backup", "bkp", "dump", "exp", "redo", "dbfs", "asm", "acfs",
+    "recovery", "reco", "mnt", "dados",
+)
+
+
+def _is_relevant_fs(mount: str, fs_type: str = "") -> bool:
+    """Retorna True se o filesystem se relaciona à coleta (DB, backup, archive)."""
+    if not mount:
+        return False
+    m = mount.lower().rstrip("/")
+    if not m:
+        m = "/"
+    if mount in _FS_IGNORE_EXACT:
+        return False
+    if any(mount.startswith(p) for p in _FS_IGNORE_PREFIX):
+        return False
+    # tipo de filesystem caracteristicamente Oracle
+    if fs_type and fs_type.lower() in ("acfs", "asm", "ocfs2"):
+        return True
+    if any(h in m for h in _FS_KEEP_HINTS):
+        return True
+    return False
+
+
+def _relevant_filesystems(report: CollectReport):
+    fss = [f for f in report.filesystems if _is_relevant_fs(f.mount, f.fs_type)]
+    return fss or list(report.filesystems)  # fallback: se filtro zerou, mostra tudo
+
+# ---------------------------------------------------------------------------
 # Style helpers
 # ---------------------------------------------------------------------------
 
@@ -69,12 +110,13 @@ def _fmt_gb(v: float | None) -> str:
 
 
 def _kpi_table(report: CollectReport):
-    crit = sum(1 for fs in report.filesystems if fs.use_pct >= 90)
-    warn = sum(1 for fs in report.filesystems if 75 <= fs.use_pct < 90)
+    rel_fs = _relevant_filesystems(report)
+    crit = sum(1 for fs in rel_fs if fs.use_pct >= 90)
+    warn = sum(1 for fs in rel_fs if 75 <= fs.use_pct < 90)
     cresc_total = crescimento_total_mensal(report)
     rows = [
         ["Instâncias", "Filesystems", "Crítico", "Atenção", "Crescimento mensal"],
-        [str(len(report.instances)), str(len(report.filesystems)),
+        [str(len(report.instances)), str(len(rel_fs)),
          str(crit), str(warn), _fmt_gb(cresc_total)],
     ]
     t = Table(rows, colWidths=[3.4 * cm] * 5)
@@ -100,7 +142,7 @@ def _kpi_table(report: CollectReport):
 # ---------------------------------------------------------------------------
 
 def _chart_growth(report: CollectReport) -> Image | None:
-    instances = [i for i in report.instances if i.crescimento]
+    instances = [i for i in report.instances if i.crescimento and len(i.crescimento) >= 2]
     instances.sort(key=lambda i: i.media_crescimento_mensal_gb, reverse=True)
     top = instances[:6]
     if not top:
@@ -108,17 +150,23 @@ def _chart_growth(report: CollectReport) -> Image | None:
     fig, ax = plt.subplots(figsize=(8, 5.0))
     for inst in top:
         labels = [g.period for g in inst.crescimento]
-        vals = [g.total_gb for g in inst.crescimento]
+        vals = [max(g.total_gb, 0.1) for g in inst.crescimento]  # evita 0 em log
         ax.plot(labels, vals, marker="o", linewidth=1.6, label=inst.nome)
-    ax.set_title("Evolução do tamanho da base — Top instâncias",
+    # escala logarítmica para que instâncias pequenas e grandes sejam legíveis
+    ax.set_yscale("log")
+    ax.set_title("Evolução do tamanho da base — Top instâncias (escala log)",
                  fontsize=12, pad=14)
-    ax.set_ylabel("Tamanho (GB)")
+    ax.set_ylabel("Tamanho (GB) — escala logarítmica")
     ax.tick_params(axis="x", rotation=45, labelsize=8)
-    ax.grid(True, alpha=0.3)
-    # legenda fora do gráfico (abaixo) para não cortar título nem sobrepor linhas
+    ax.grid(True, which="both", alpha=0.3)
     ax.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.22),
               ncol=min(len(top), 3), frameon=False)
-    fig.subplots_adjust(top=0.88, bottom=0.28, left=0.09, right=0.97)
+    fig.subplots_adjust(top=0.88, bottom=0.28, left=0.10, right=0.97)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=140, bbox_inches="tight", pad_inches=0.25)
+    plt.close(fig)
+    buf.seek(0)
+    return Image(buf, width=17 * cm, height=9.5 * cm)
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=140, bbox_inches="tight", pad_inches=0.25)
     plt.close(fig)
@@ -159,29 +207,33 @@ def _chart_projection(report: CollectReport) -> Image | None:
 
 
 def _chart_filesystem(report: CollectReport) -> Image | None:
-    if not report.filesystems:
+    fs_list = _relevant_filesystems(report)
+    if not fs_list:
         return None
-    fs_sorted = sorted(report.filesystems, key=lambda f: f.use_pct, reverse=True)
+    fs_sorted = sorted(fs_list, key=lambda f: f.use_pct, reverse=True)
     names = [f.mount for f in fs_sorted]
     pcts = [f.use_pct for f in fs_sorted]
     cols = ["#c0392b" if p >= 90 else "#d68910" if p >= 75 else "#1e8449"
             for p in pcts]
-    fig, ax = plt.subplots(figsize=(8, max(4.0, 0.38 * len(names) + 1)))
+    fig, ax = plt.subplots(figsize=(8, max(3.4, 0.42 * len(names) + 1)))
     bars = ax.barh(names, pcts, color=cols)
     ax.invert_yaxis()
     ax.set_xlim(0, 110)
     ax.set_xlabel("Uso (%)")
-    ax.set_title("Ocupação por filesystem", fontsize=12, pad=14)
+    ax.set_title("Ocupação por filesystem (datafiles, backups e archives)",
+                 fontsize=12, pad=14)
     for bar, pct in zip(bars, pcts):
         ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height() / 2,
                 f"{pct:.0f}%", va="center", fontsize=8)
     ax.grid(True, axis="x", alpha=0.3)
-    fig.subplots_adjust(top=0.92, bottom=0.12, left=0.22, right=0.97)
+    fig.subplots_adjust(top=0.92, bottom=0.18, left=0.28, right=0.97)
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=140, bbox_inches="tight", pad_inches=0.25)
     plt.close(fig)
     buf.seek(0)
-    return Image(buf, width=17 * cm, height=min(15, 0.6 * len(names) + 2.5) * cm)
+    # altura proporcional, com teto para caber em uma página
+    h_cm = min(11.0, 0.65 * len(names) + 2.0)
+    return Image(buf, width=17 * cm, height=h_cm * cm)
 
 
 # ---------------------------------------------------------------------------
@@ -214,13 +266,15 @@ def _server_block(report: CollectReport, st):
 
 
 def _filesystem_table(report: CollectReport):
+    fs_list = _relevant_filesystems(report)
     # crescimento atribuído proporcionalmente apenas a filesystems "grandes" (≥100 GB)
     base_growth = crescimento_base_mensal(report)
-    big = [f for f in report.filesystems if f.size_gb >= 100]
+    big = [f for f in fs_list if f.size_gb >= 100]
     big_total = sum(f.size_gb for f in big) or 1
     rows = [["Mount", "Tipo", "Tamanho", "Usado", "Livre", "%", "Status",
              "Meses\nestimados"]]
-    for fs in sorted(report.filesystems, key=lambda f: f.use_pct, reverse=True):
+    fs_sorted = sorted(fs_list, key=lambda f: f.use_pct, reverse=True)
+    for fs in fs_sorted:
         if fs in big and base_growth > 0:
             share = base_growth * (fs.size_gb / big_total)
             meses = filesystem_meses_ate_lotar(fs, share)
@@ -240,7 +294,7 @@ def _filesystem_table(report: CollectReport):
         ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]
-    for i, fs in enumerate(sorted(report.filesystems, key=lambda f: f.use_pct, reverse=True), start=1):
+    for i, fs in enumerate(fs_sorted, start=1):
         if fs.use_pct >= 90:
             style.append(("BACKGROUND", (6, i), (6, i), DANGER))
             style.append(("TEXTCOLOR", (6, i), (6, i), colors.white))
@@ -348,11 +402,13 @@ def build_pdf(report: CollectReport, output_path: str | Path,
     # Resumo executivo (texto)
     base_total = sum((i.db_size_gb or 0) for i in report.instances)
     growth_total = crescimento_total_mensal(report)
-    crit_fs = [fs for fs in report.filesystems if fs.use_pct >= 90]
+    relevant_fs = _relevant_filesystems(report)
+    crit_fs = [fs for fs in relevant_fs if fs.use_pct >= 90]
     resumo = (
         f"O ambiente analisado conta com <b>{len(report.instances)} instâncias</b> "
         f"de banco de dados totalizando <b>{_fmt_gb(base_total)}</b> de dados, "
-        f"distribuídos em <b>{len(report.filesystems)} filesystems</b>. "
+        f"distribuídos em <b>{len(relevant_fs)} filesystems</b> relacionados a "
+        f"datafiles, backups e archives. "
         f"O crescimento mensal estimado é de <b>{_fmt_gb(growth_total)}</b>, "
         f"considerando histórico de bases e geração de archive logs. "
     )
@@ -369,10 +425,18 @@ def build_pdf(report: CollectReport, output_path: str | Path,
     # ---------- servidor ----------
     story.append(Paragraph("1. Infraestrutura — Servidor", st["H1Custom"]))
     story.append(_server_block(report, st))
-    story.append(Spacer(1, 10))
 
-    # ---------- filesystems ----------
-    story.append(Paragraph("2. Filesystems", st["H1Custom"]))
+    # ---------- filesystems (sempre em página dedicada) ----------
+    story.append(PageBreak())
+    story.append(Paragraph("2. Filesystems relacionados à coleta", st["H1Custom"]))
+    story.append(Paragraph(
+        "Apresentamos abaixo apenas os filesystems relevantes para a operação de "
+        "banco de dados — datafiles, backups, archives e FRA. Filesystems de "
+        "sistema operacional (/, /var, /var/log, /tmp, /home, /boot) foram "
+        "omitidos para foco analítico.",
+        st["BodyText"],
+    ))
+    story.append(Spacer(1, 4))
     fs_chart = _chart_filesystem(report)
     if fs_chart:
         story.append(fs_chart)

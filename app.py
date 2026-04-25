@@ -128,14 +128,17 @@ st.caption(
 # -------- KPIs --------
 crit = sum(1 for fs in report.filesystems if fs.use_pct >= 90)
 warn = sum(1 for fs in report.filesystems if 75 <= fs.use_pct < 90)
-growth_total = crescimento_total_mensal(report)
+growth_base_total = sum(i.media_crescimento_mensal_gb for i in report.instances)
+archive_mes_total = sum(i.media_archive_mensal_gb for i in report.instances)
+growth_total = growth_base_total  # compat
 base_total = sum((i.db_size_gb or 0) for i in report.instances)
 
 c1, c2, c3, c4, c5 = st.columns(5)
 kpi(c1, "Instâncias", str(len(report.instances)),
     f"{sum(1 for i in report.instances if i.aberto)} abertas")
 kpi(c2, "Volume total", fmt_gb(base_total), "soma de bases físicas")
-kpi(c3, "Crescimento/mês", fmt_gb(growth_total), "base + archives")
+kpi(c3, "Cresc. base/mês", fmt_gb(growth_base_total),
+    f"+ {fmt_gb(archive_mes_total)}/mês em archives")
 kpi(c4, "Filesystems", str(len(report.filesystems)),
     f"{crit} críticos · {warn} atenção")
 kpi(c5, "Backups identificados", str(len(report.backups)),
@@ -221,17 +224,34 @@ with tab_inst:
         "Tamanho (GB)": round(i.db_size_gb or 0, 1),
         "Usado (GB)": round(i.db_used_gb or 0, 1),
         "Livre (GB)": round(i.db_free_gb or 0, 1),
-        "Cresc/mês (GB)": round(i.media_crescimento_mensal_gb, 1),
-        "Archive/dia (GB)": round(i.media_archive_diaria_gb, 1),
-        "Cresc total/mês (GB)": round(i.crescimento_total_mensal_gb, 1),
+        "Cresc base/mês (GB)": round(i.media_crescimento_mensal_gb, 1),
+        "% mês": round(i.pct_crescimento_mensal, 2),
+        "Meses considerados": i.qtd_meses_considerados,
+        "Archive/dia (GB)": round(i.media_archive_diaria_gb, 2),
+        "Archive/mês (GB)": round(i.media_archive_mensal_gb, 1),
+        "Local archives": i.archives_location or "—",
         "Aberto": "✅" if i.aberto else "⚠️",
     } for i in report.instances])
     st.dataframe(df.sort_values("Tamanho (GB)", ascending=False),
                  width="stretch", hide_index=True)
 
-    st.markdown("### Detalhe de crescimento por instância")
+    st.markdown("### Detalhe por instância")
     sel = st.selectbox("Instância", [i.nome for i in report.instances])
     inst = next(i for i in report.instances if i.nome == sel)
+
+    ca, cb, cc, cd = st.columns(4)
+    kpi(ca, "Tamanho atual", fmt_gb(inst.db_size_gb or 0), "datafiles")
+    kpi(cb, "Cresc. médio/mês",
+        fmt_gb(inst.media_crescimento_mensal_gb),
+        f"{inst.pct_crescimento_mensal:.2f}% • {inst.qtd_meses_considerados} meses")
+    kpi(cc, "Archives/dia (média)",
+        fmt_gb(inst.media_archive_diaria_gb),
+        f"{fmt_gb(inst.media_archive_mensal_gb)}/mês")
+    loc = inst.archives_location or "—"
+    kpi(cd, "Local archives",
+        (loc[:22] + "…") if len(loc) > 22 else loc,
+        "log_archive_dest")
+
     if inst.crescimento:
         df_g = pd.DataFrame([{
             "Período": g.period, "Tamanho (GB)": round(g.total_gb, 1),
@@ -255,6 +275,19 @@ with tab_inst:
     else:
         st.info("Sem histórico de crescimento para esta instância.")
 
+    if inst.datafiles and report.filesystems:
+        mounts = [fs.mount for fs in report.filesystems]
+        dist = inst.datafiles_por_mount(mounts)
+        if dist:
+            st.markdown("#### 📂 Distribuição dos datafiles por filesystem")
+            total_dist = sum(dist.values())
+            df_dist = pd.DataFrame([
+                {"Filesystem": k, "Tamanho atual (GB)": round(v, 1),
+                 "% da base": round(100*v/total_dist, 1) if total_dist else 0}
+                for k, v in sorted(dist.items(), key=lambda x: -x[1])
+            ])
+            st.dataframe(df_dist, width="stretch", hide_index=True)
+
     if inst.datafiles:
         with st.expander(f"Datafiles ({len(inst.datafiles)})"):
             df_d = pd.DataFrame([{
@@ -265,13 +298,34 @@ with tab_inst:
 
 # === Projeção ===
 with tab_proj:
-    st.markdown("### Projeção total de capacidade")
+    st.markdown("### 🔮 Lógica de projeção")
+    st.markdown("""
+- **Crescimento da base** = média dos meses do histórico **ignorando zeros e negativos**
+  (apenas meses com crescimento real entram no cálculo, dividido pela quantidade
+  de meses válidos).
+- **Archives** são gerados, copiados pelo backup e **apagados** — não somam ao
+  tamanho da base no longo prazo, mas pressionam o filesystem de archives.
+- **Backups** crescem proporcionalmente: tamanho da base + archives gerados no mês.
+- **Filesystems** projetados individualmente conforme onde estão os datafiles
+  de cada instância (mapeamento por caminho do arquivo).
+    """)
+
+    base_total = sum((i.db_size_gb or 0) for i in report.instances)
+    growth_base = sum(i.media_crescimento_mensal_gb for i in report.instances)
+    archive_mes = sum(i.media_archive_mensal_gb for i in report.instances)
+
+    cp1, cp2, cp3 = st.columns(3)
+    kpi(cp1, "Base total atual", fmt_gb(base_total), "soma datafiles")
+    kpi(cp2, "Cresc. base/mês", fmt_gb(growth_base), "média meses válidos")
+    kpi(cp3, "Archives/mês", fmt_gb(archive_mes), "geração total estimada")
+
+    st.markdown("### Projeção total da BASE (12 / 24 / 36 meses)")
     months = list(range(0, 37))
-    series = [base_total + growth_total * m for m in months]
+    series = [base_total + growth_base * m for m in months]
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=months, y=series, fill="tozeroy",
                              line=dict(color="#1f3a68", width=2),
-                             fillcolor="rgba(46,125,209,0.25)", name="Projeção"))
+                             fillcolor="rgba(46,125,209,0.25)", name="Base"))
     y_max = max(series) * 1.18 if series else 1
     for marker in (12, 24, 36):
         fig.add_vline(x=marker, line_dash="dash", line_color="grey")
@@ -283,25 +337,120 @@ with tab_proj:
             bgcolor="rgba(255,255,255,0.9)", bordercolor="#1f3a68", borderwidth=1,
             font=dict(size=11, color="#1f3a68"),
         )
-    fig.update_layout(height=460, xaxis_title="Meses", yaxis_title="Tamanho total (GB)",
+    fig.update_layout(height=460, xaxis_title="Meses", yaxis_title="Tamanho da base (GB)",
                       margin=dict(l=10, r=20, t=70, b=40),
                       yaxis=dict(range=[0, y_max]))
     st.plotly_chart(fig, width="stretch")
 
-    st.markdown("### Tempo estimado até lotar (por filesystem)")
-    if report.filesystems:
-        per_fs_growth = growth_total / max(1, len(report.filesystems))
-        df_t = pd.DataFrame([{
-            "Mount": fs.mount, "Livre (GB)": round(fs.free_gb, 1),
-            "Cresc atribuído (GB/mês)": round(per_fs_growth, 1),
-            "Meses até lotar": (
-                f"{filesystem_meses_ate_lotar(fs, per_fs_growth):.1f}"
-                if filesystem_meses_ate_lotar(fs, per_fs_growth) else "—"
-            ),
-        } for fs in report.filesystems])
-        st.dataframe(df_t, width="stretch", hide_index=True)
-        st.caption("⚠️ O crescimento total é distribuído proporcionalmente entre os "
-                   "filesystems. Para precisão por mount, mapeie datafiles → mount.")
+    st.markdown("### 📂 Projeção de crescimento por destino físico (filesystem / ASM)")
+    if report.instances:
+        mounts = [fs.mount for fs in report.filesystems]
+        # capacidade conhecida por destino
+        cap_total: dict[str, float] = {fs.mount: fs.size_gb for fs in report.filesystems}
+        cap_used: dict[str, float] = {fs.mount: fs.used_gb for fs in report.filesystems}
+        cap_free: dict[str, float] = {fs.mount: fs.free_gb for fs in report.filesystems}
+        for a in report.asm:
+            key = f"ASM +{a.name}" if not a.name.startswith("+") else f"ASM {a.name}"
+            cap_total[key] = a.total_gb
+            cap_used[key] = a.used_gb
+            cap_free[key] = a.usable_free_gb
+
+        growth_por_dest: dict[str, float] = {}
+        atual_por_dest: dict[str, float] = {}
+        detalhes = []
+        for i in report.instances:
+            dist = i.datafiles_por_mount(mounts)
+            total_dist = sum(dist.values())
+            if total_dist <= 0:
+                continue
+            for dest, gb in dist.items():
+                share = gb / total_dist
+                atual_por_dest[dest] = atual_por_dest.get(dest, 0.0) + gb
+                growth_por_dest[dest] = growth_por_dest.get(dest, 0.0) + \
+                    i.media_crescimento_mensal_gb * share
+                detalhes.append({
+                    "Instância": i.nome,
+                    "Tamanho instância (GB)": round(i.db_size_gb or 0, 1),
+                    "Destino": dest,
+                    "Datafiles aqui (GB)": round(gb, 1),
+                    "% nesse destino": round(100*share, 1),
+                    "Cresc. atribuído (GB/mês)":
+                        round(i.media_crescimento_mensal_gb * share, 2),
+                })
+
+        if detalhes:
+            st.markdown("#### Distribuição instância × destino")
+            st.dataframe(pd.DataFrame(detalhes).sort_values(
+                ["Instância", "Datafiles aqui (GB)"], ascending=[True, False]),
+                width="stretch", hide_index=True)
+
+        rows = []
+        all_dest = sorted(set(list(cap_total.keys()) + list(growth_por_dest.keys())))
+        for dest in all_dest:
+            g = growth_por_dest.get(dest, 0.0)
+            atual_dat = atual_por_dest.get(dest, 0.0)
+            tam = cap_total.get(dest)
+            usado = cap_used.get(dest)
+            livre = cap_free.get(dest)
+            meses_lotar = (livre / g) if (livre and g > 0) else None
+            rows.append({
+                "Destino": dest,
+                "Capacidade (GB)": round(tam, 1) if tam else "—",
+                "Usado (GB)": round(usado, 1) if usado is not None else "—",
+                "Livre (GB)": round(livre, 1) if livre is not None else "—",
+                "Datafiles aqui (GB)": round(atual_dat, 1),
+                "Cresc/mês (GB)": round(g, 2),
+                "Em 12m (GB)":
+                    round((usado or 0) + g*12, 1) if usado is not None else "—",
+                "Em 24m (GB)":
+                    round((usado or 0) + g*24, 1) if usado is not None else "—",
+                "Em 36m (GB)":
+                    round((usado or 0) + g*36, 1) if usado is not None else "—",
+                "Meses até lotar":
+                    f"{meses_lotar:.1f}" if meses_lotar else "—",
+            })
+        df_fs = pd.DataFrame(rows)
+        st.markdown("#### Consolidado por destino físico")
+        st.dataframe(df_fs, width="stretch", hide_index=True)
+
+        # gráfico (apenas destinos com capacidade conhecida e cresc > 0)
+        chart_rows = [r for r in rows
+                      if isinstance(r["Usado (GB)"], (int, float))
+                      and r["Cresc/mês (GB)"] > 0]
+        if chart_rows:
+            fig = go.Figure()
+            for r in chart_rows:
+                xs = list(range(0, 37))
+                ys = [r["Usado (GB)"] + r["Cresc/mês (GB)"]*x for x in xs]
+                fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines",
+                                         name=r["Destino"]))
+                if isinstance(r["Capacidade (GB)"], (int, float)):
+                    fig.add_hline(y=r["Capacidade (GB)"], line_dash="dot",
+                                  line_color="rgba(192,57,43,0.35)")
+            fig.update_layout(
+                height=460, xaxis_title="Meses", yaxis_title="Uso projetado (GB)",
+                margin=dict(l=10, r=20, t=50, b=60),
+                legend=dict(orientation="h", y=-0.18),
+            )
+            st.plotly_chart(fig, width="stretch")
+        st.caption("Linhas pontilhadas = capacidade total de cada destino.")
+    else:
+        st.info("Sem dados de filesystems ou instâncias para projeção detalhada.")
+
+    st.markdown("### 📦 Geração de archives por instância")
+    df_arch = pd.DataFrame([{
+        "Instância": i.nome,
+        "Archive/dia (GB)": round(i.media_archive_diaria_gb, 2),
+        "Archive/mês (GB)": round(i.media_archive_mensal_gb, 1),
+        "Local (destination)": i.archives_location or "—",
+    } for i in report.instances if i.media_archive_diaria_gb > 0])
+    if df_arch.empty:
+        st.info("Nenhuma instância com geração de archive identificada.")
+    else:
+        st.dataframe(df_arch, width="stretch", hide_index=True)
+        st.caption("ℹ️ Archives são copiados pelo backup e apagados — "
+                   "não somam ao tamanho da base, mas dimensionam o "
+                   "filesystem de archive e o repositório de backup.")
 
 # === Backups ===
 with tab_bkp:

@@ -160,30 +160,109 @@ class Instance:
 
     # ---------- métricas ----------
     @property
+    def crescimento_meses_validos(self) -> list[float]:
+        """Crescimentos mensais ignorando zero, negativos e None.
+        Considera apenas o último ano de histórico (até 12 meses)."""
+        return [e.growth_gb for e in self.crescimento[-12:]
+                if e.growth_gb is not None and e.growth_gb > 0]
+
+    @property
     def media_crescimento_mensal_gb(self) -> float:
-        valid = [e.growth_gb for e in self.crescimento[-12:] if e.growth_gb > 0]
+        """Média do crescimento mensal da BASE (datafiles).
+        Soma os crescimentos válidos / quantidade de meses válidos."""
+        valid = self.crescimento_meses_validos
         if not valid:
             return 0.0
         return sum(valid) / len(valid)
+
+    @property
+    def qtd_meses_considerados(self) -> int:
+        return len(self.crescimento_meses_validos)
 
     @property
     def media_archive_diaria_gb(self) -> float:
-        valid = [v for v in self.archives_daily_gb if v > 0]
+        valid = [v for v in self.archives_daily_gb if v is not None and v > 0]
         if not valid:
             return 0.0
         return sum(valid) / len(valid)
 
     @property
-    def crescimento_archive_mensal_gb(self) -> float:
+    def media_archive_mensal_gb(self) -> float:
+        """Geração mensal de archives (média diária × 30 dias)."""
         return self.media_archive_diaria_gb * 30
 
     @property
-    def crescimento_total_mensal_gb(self) -> float:
-        return self.media_crescimento_mensal_gb + self.crescimento_archive_mensal_gb
+    def pct_crescimento_mensal(self) -> float:
+        """% de crescimento mensal sobre o tamanho atual da base."""
+        base = self.db_size_gb or 0
+        if base <= 0:
+            return 0.0
+        return (self.media_crescimento_mensal_gb / base) * 100
 
-    def projecao_gb(self, meses: int) -> float:
+    # --- compat (mantido p/ outras telas) ---
+    @property
+    def crescimento_archive_mensal_gb(self) -> float:
+        return self.media_archive_mensal_gb
+
+    @property
+    def crescimento_total_mensal_gb(self) -> float:
+        """Crescimento real esperado da BASE por mês.
+        Archives são gerados, copiados em backup e apagados —
+        não somam ao tamanho da base no longo prazo, apenas pressionam
+        o filesystem de archives temporariamente."""
+        return self.media_crescimento_mensal_gb
+
+    def projecao_base_gb(self, meses: int) -> float:
+        """Projeção da BASE (datafiles) considerando média mensal × meses."""
         base = self.db_size_gb or 0.0
-        return base + self.crescimento_total_mensal_gb * meses
+        return base + self.media_crescimento_mensal_gb * meses
+
+    def projecao_archives_residente_gb(self, dias_retencao: int = 1) -> float:
+        """Volume médio de archives presente no FS de archives
+        (gerado e ainda não apagado pelo backup). Default: 1 dia."""
+        return self.media_archive_diaria_gb * max(1, dias_retencao)
+
+    def projecao_backup_mensal_gb(self) -> float:
+        """Crescimento mensal estimado de área de backup:
+        base atual cresce por mês + archives gerados no mês."""
+        return self.media_crescimento_mensal_gb + self.media_archive_mensal_gb
+
+    # alias antigo
+    def projecao_gb(self, meses: int) -> float:
+        return self.projecao_base_gb(meses)
+
+    # ---------- distribuição de datafiles por filesystem / ASM DG ----------
+    def datafiles_por_mount(self, mounts: list[str]) -> dict[str, float]:
+        """Agrupa o tamanho (GB) dos datafiles pelo destino físico:
+        - paths começando com '+' são tratados como ASM (chave 'ASM +DG')
+        - paths POSIX casam com o mount mais específico (mais longo)
+        - sem match → '(desconhecido)'.
+        """
+        ordered = sorted([m for m in mounts if m and m != "/"],
+                         key=len, reverse=True)
+        has_root = "/" in mounts
+        out: dict[str, float] = {}
+        for d in self.datafiles:
+            gb = (d.mb_used or 0) / 1024.0
+            if gb <= 0:
+                gb = (d.mb_max or 0) / 1024.0
+            path = (d.filename or "").strip()
+            chosen: Optional[str] = None
+            if path.startswith("+"):
+                dg = path.split("/", 1)[0]   # ex: '+DATAC1'
+                chosen = f"ASM {dg}"
+            else:
+                for m in ordered:
+                    pref = m.rstrip("/") + "/"
+                    if path.startswith(pref) or path == m:
+                        chosen = m
+                        break
+                if chosen is None and has_root and path.startswith("/"):
+                    chosen = "/"
+            if chosen is None:
+                chosen = "(desconhecido)"
+            out[chosen] = out.get(chosen, 0.0) + gb
+        return out
 
 
 @dataclass
