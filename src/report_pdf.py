@@ -105,22 +105,25 @@ def _chart_growth(report: CollectReport) -> Image | None:
     top = instances[:6]
     if not top:
         return None
-    fig, ax = plt.subplots(figsize=(8, 4.2))
+    fig, ax = plt.subplots(figsize=(8, 5.0))
     for inst in top:
         labels = [g.period for g in inst.crescimento]
         vals = [g.total_gb for g in inst.crescimento]
         ax.plot(labels, vals, marker="o", linewidth=1.6, label=inst.nome)
-    ax.set_title("Evolução do tamanho da base — Top instâncias", fontsize=12)
+    ax.set_title("Evolução do tamanho da base — Top instâncias",
+                 fontsize=12, pad=14)
     ax.set_ylabel("Tamanho (GB)")
     ax.tick_params(axis="x", rotation=45, labelsize=8)
     ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8, loc="upper left")
-    fig.tight_layout()
+    # legenda fora do gráfico (abaixo) para não cortar título nem sobrepor linhas
+    ax.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.22),
+              ncol=min(len(top), 3), frameon=False)
+    fig.subplots_adjust(top=0.88, bottom=0.28, left=0.09, right=0.97)
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=140)
+    fig.savefig(buf, format="png", dpi=140, bbox_inches="tight", pad_inches=0.25)
     plt.close(fig)
     buf.seek(0)
-    return Image(buf, width=17 * cm, height=8.5 * cm)
+    return Image(buf, width=17 * cm, height=9.5 * cm)
 
 
 def _chart_projection(report: CollectReport) -> Image | None:
@@ -130,25 +133,29 @@ def _chart_projection(report: CollectReport) -> Image | None:
         return None
     months = list(range(0, 37))
     series = [base_total + growth_total * m for m in months]
-    fig, ax = plt.subplots(figsize=(8, 4))
+    fig, ax = plt.subplots(figsize=(8, 4.4))
     ax.fill_between(months, series, alpha=0.25, color="#2e7dd1")
     ax.plot(months, series, color="#1f3a68", linewidth=2)
+    # margem extra no topo para que as anotações não sejam cortadas
+    ymax = max(series) * 1.15
+    ax.set_ylim(0, ymax)
     for marker in (12, 24, 36):
         ax.axvline(marker, color="grey", linestyle="--", alpha=0.5)
         ax.annotate(f"{_fmt_gb(series[marker])}",
                     xy=(marker, series[marker]),
-                    xytext=(4, 6), textcoords="offset points",
+                    xytext=(4, 8), textcoords="offset points",
                     fontsize=8, color="#1f3a68")
-    ax.set_title("Projeção total de armazenamento (todas as instâncias)", fontsize=12)
+    ax.set_title("Projeção total de armazenamento (todas as instâncias)",
+                 fontsize=12, pad=14)
     ax.set_xlabel("Meses a partir de hoje")
     ax.set_ylabel("Tamanho total (GB)")
     ax.grid(True, alpha=0.3)
-    fig.tight_layout()
+    fig.subplots_adjust(top=0.88, bottom=0.15, left=0.10, right=0.97)
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=140)
+    fig.savefig(buf, format="png", dpi=140, bbox_inches="tight", pad_inches=0.25)
     plt.close(fig)
     buf.seek(0)
-    return Image(buf, width=17 * cm, height=8 * cm)
+    return Image(buf, width=17 * cm, height=8.5 * cm)
 
 
 def _chart_filesystem(report: CollectReport) -> Image | None:
@@ -159,22 +166,22 @@ def _chart_filesystem(report: CollectReport) -> Image | None:
     pcts = [f.use_pct for f in fs_sorted]
     cols = ["#c0392b" if p >= 90 else "#d68910" if p >= 75 else "#1e8449"
             for p in pcts]
-    fig, ax = plt.subplots(figsize=(8, max(3.5, 0.35 * len(names))))
+    fig, ax = plt.subplots(figsize=(8, max(4.0, 0.38 * len(names) + 1)))
     bars = ax.barh(names, pcts, color=cols)
     ax.invert_yaxis()
-    ax.set_xlim(0, 105)
+    ax.set_xlim(0, 110)
     ax.set_xlabel("Uso (%)")
-    ax.set_title("Ocupação por filesystem", fontsize=12)
+    ax.set_title("Ocupação por filesystem", fontsize=12, pad=14)
     for bar, pct in zip(bars, pcts):
         ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height() / 2,
                 f"{pct:.0f}%", va="center", fontsize=8)
     ax.grid(True, axis="x", alpha=0.3)
-    fig.tight_layout()
+    fig.subplots_adjust(top=0.92, bottom=0.12, left=0.22, right=0.97)
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=140)
+    fig.savefig(buf, format="png", dpi=140, bbox_inches="tight", pad_inches=0.25)
     plt.close(fig)
     buf.seek(0)
-    return Image(buf, width=17 * cm, height=min(14, 0.55 * len(names) + 2) * cm)
+    return Image(buf, width=17 * cm, height=min(15, 0.6 * len(names) + 2.5) * cm)
 
 
 # ---------------------------------------------------------------------------

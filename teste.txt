@@ -1,0 +1,75 @@
+################################################################################
+# RELATÓRIO DE INFRAESTRUTURA E BANCO DE DADOS - AMBIENTE FICTÍCIO             #
+# GERADO EM: 25/04/2026                                                        #
+################################################################################
+
+############################################SERVIDOR############################
+Hostname: srv-db-prod-01.ficticio.com.br
+IP: 10.10.20.55
+S.O: Enterprise Linux release 8.5 (Orizon)
+Versão Banco: Database Engine 19c Enterprise Edition - 64bit
+Fabricante: TechSystems Inc.
+Modelo: ComputeNode R740
+Service Tag: ZX99YW1
+Qtd. Proc: 4
+Modelo Proc: Intel(R) Core(R) Titanium 8280
+Multi-Processamento: 64
+Memória: 512 Gb
+
+Filesystem                 Type  Size  Used Avail Use% Mounted on
+/dev/mapper/sys-root       ext4   50G   12G   38G  24%  /
+/dev/sda1                  vfat  512M   80M  432M  16%  /boot/efi
+/dev/mapper/data-db        ext4  10.0T  8.2T  1.8T  82%  /u01
+/dev/mapper/data-fra       ext4   2.0T  500G  1.5T  25%  /u02
+
+##########################################BANCO#################################
+Nome Instância: PRODDB
+Tipo: Produção
+Tamanho Banco Físico:
+Database Size       |Used space          |Free space
+8192 GB             |7450 GB             |742 GB
+
+Tamanho Banco Lógico:
+_________Size_|_Type__________
+   2,500,000M | INDEX
+         120M | INDEX PARTITION
+          50M | LOB PARTITION
+     400,000M | LOBSEGMENT
+   5,200,000M | TABLE
+          80M | TABLE PARTITION
+--------------|----------------
+     7,900.5G | Total
+
+Crescimento da base:
+Date___|TotalUsage|MonthGrown|Percentage
+Jan2026|  5,100.0G| +150,000M|    100.0%
+Feb2026|  5,400.0G| +300,000M|    105.8%
+Mar2026|  5,850.0G| +450,000M|    114.7%
+Apr2026|  6,300.0G| +450,000M|    123.5%
+
+Geração de archives (Média Diária):
+DD = [ 180,000M | 165,500M | 172,000M | 195,000M | 160,000M ]
+
+Local dos archives:
+/u02/app/oracle/fast_recovery_area/PRODDB/archivelog/
+
+Local físico dos datafiles (Amostra):
+FID|TBS           |FN                                           |PCT|MB_USED|MB_MAX
+  1|SYSTEM        |/u01/oradata/PRODDB/system01.dbf             | 40| 12000 | 30000
+  2|SYSAUX        |/u01/oradata/PRODDB/sysaux01.dbf             | 85| 25500 | 30000
+  3|TBS_DATA_01   |/u01/oradata/PRODDB/tbs_data001.dbf          |100| 30000 | 30000
+  4|TBS_INDX_01   |/u01/oradata/PRODDB/tbs_indx001.dbf          | 70| 21000 | 30000
+  5|UNDOTBS1      |/u01/oradata/PRODDB/undotbs01.dbf            |100| 30000 | 30000
+
+################################################BACKUP´S########################
+Tipo: RMAN FULL
+Diretório: /backup/rman/full
+Tamanho: 180 Gb
+Horário de inicio: 22:30
+Duração média: 01:15:00
+
+Tipo: EXPORT DATA
+Diretório: /backup/export/diario
+Tamanho: 45 Gb
+Horário de inicio: 02:00
+Duração média: 00:40:00

@@ -41,6 +41,15 @@ st.markdown("""
 .alert-crit {background:#fdecea; border-left:4px solid #c0392b; padding:10px 14px; border-radius:6px; margin-bottom:6px;}
 .alert-warn {background:#fdf3e3; border-left:4px solid #d68910; padding:10px 14px; border-radius:6px; margin-bottom:6px;}
 .section-title {color:#1f3a68; font-weight:700; margin-top:6px;}
+.author-badge {
+  display:inline-block; background:#eef3fa; color:#1f3a68;
+  padding:4px 12px; border-radius:20px; font-size:12px; font-weight:600;
+  border:1px solid #d6e2f2; margin-top:6px;
+}
+.app-footer {
+  text-align:center; color:#6b7a8f; font-size:12px;
+  padding:18px 0 6px; margin-top:30px; border-top:1px solid #e6ecf3;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -69,9 +78,13 @@ st.sidebar.caption("Análise executiva de coleta de ambiente")
 cliente = st.sidebar.text_input("Nome do cliente", value="Cliente")
 uploaded = st.sidebar.file_uploader("Arquivo TXT da coleta", type=["txt"])
 use_sample = st.sidebar.checkbox("Usar arquivo de exemplo (teste.txt)", value=False)
+st.sidebar.markdown("---")
+st.sidebar.caption("👨‍💻 Desenvolvido por **Marciano Silva**")
 
 if not uploaded and not use_sample:
     st.title("Análise Profissional de Volumetria")
+    st.markdown('<span class="author-badge">👨‍💻 Desenvolvido por Marciano Silva</span>',
+                unsafe_allow_html=True)
     st.info("⬅️ Envie o arquivo TXT da coleta na barra lateral para iniciar a análise.")
     st.markdown("""
 **A ferramenta interpreta automaticamente:**
@@ -105,6 +118,8 @@ with st.spinner("Interpretando coleta..."):
 
 # -------- header --------
 st.title("Análise Profissional de Volumetria")
+st.markdown('<span class="author-badge">👨‍💻 Desenvolvido por Marciano Silva</span>',
+            unsafe_allow_html=True)
 st.caption(
     f"Cliente: **{cliente}** · Servidor: **{report.server.hostname or '—'}** · "
     f"Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}"
@@ -154,7 +169,7 @@ with tab_dash:
                      color="Crescimento/mês (GB)",
                      color_continuous_scale="Blues",
                      hover_data=["Tamanho atual (GB)"])
-        fig.update_layout(height=380, showlegend=False, margin=dict(l=0, r=0, t=10, b=0))
+        fig.update_layout(height=380, showlegend=False, margin=dict(l=10, r=10, t=50, b=10))
         st.plotly_chart(fig, width="stretch")
     else:
         st.info("Nenhuma instância com histórico de crescimento.")
@@ -187,7 +202,7 @@ with tab_fs:
                      color_discrete_map={"CRÍTICO": "#c0392b", "ATENÇÃO": "#d68910",
                                           "OK": "#1e8449"},
                      text="% Uso")
-        fig.update_layout(height=max(280, 28 * len(df)), margin=dict(l=0, r=0, t=10, b=0))
+        fig.update_layout(height=max(280, 28 * len(df)), margin=dict(l=10, r=10, t=50, b=10))
         st.plotly_chart(fig, width="stretch")
 
     if report.asm:
@@ -233,7 +248,7 @@ with tab_inst:
         fig.update_layout(
             yaxis=dict(title="Crescimento mensal (GB)"),
             yaxis2=dict(title="Tamanho da base (GB)", overlaying="y", side="right"),
-            height=420, margin=dict(l=0, r=0, t=10, b=0),
+            height=420, margin=dict(l=10, r=10, t=50, b=10),
             legend=dict(orientation="h", y=1.1),
         )
         st.plotly_chart(fig, width="stretch")
@@ -257,12 +272,20 @@ with tab_proj:
     fig.add_trace(go.Scatter(x=months, y=series, fill="tozeroy",
                              line=dict(color="#1f3a68", width=2),
                              fillcolor="rgba(46,125,209,0.25)", name="Projeção"))
+    y_max = max(series) * 1.18 if series else 1
     for marker in (12, 24, 36):
-        fig.add_vline(x=marker, line_dash="dash", line_color="grey",
-                      annotation_text=f"{marker}m: {fmt_gb(series[marker])}",
-                      annotation_position="top")
-    fig.update_layout(height=420, xaxis_title="Meses", yaxis_title="Tamanho total (GB)",
-                      margin=dict(l=0, r=0, t=10, b=0))
+        fig.add_vline(x=marker, line_dash="dash", line_color="grey")
+        fig.add_annotation(
+            x=marker, y=series[marker],
+            text=f"<b>{marker}m</b><br>{fmt_gb(series[marker])}",
+            showarrow=True, arrowhead=2, arrowcolor="grey",
+            ax=0, ay=-40, yanchor="bottom",
+            bgcolor="rgba(255,255,255,0.9)", bordercolor="#1f3a68", borderwidth=1,
+            font=dict(size=11, color="#1f3a68"),
+        )
+    fig.update_layout(height=460, xaxis_title="Meses", yaxis_title="Tamanho total (GB)",
+                      margin=dict(l=10, r=20, t=70, b=40),
+                      yaxis=dict(range=[0, y_max]))
     st.plotly_chart(fig, width="stretch")
 
     st.markdown("### Tempo estimado até lotar (por filesystem)")
@@ -329,3 +352,10 @@ with tab_export:
             file_name=f"relatorio_volumetria_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
             mime="application/pdf",
         )
+
+# -------- footer --------
+st.markdown(
+    '<div class="app-footer">📊 Análise Profissional de Volumetria · '
+    'Desenvolvido por <b>Marciano Silva</b></div>',
+    unsafe_allow_html=True,
+)
