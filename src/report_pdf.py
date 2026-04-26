@@ -236,6 +236,94 @@ def _chart_filesystem(report: CollectReport) -> Image | None:
     return Image(buf, width=17 * cm, height=h_cm * cm)
 
 
+def _chart_tables_compare(report):
+    items = [(t.instancia, t.total_tabelas_gb, t.total_particionadas_gb)
+             for t in report.tables if t.tables or t.partitions]
+    if not items:
+        return None
+    items.sort(key=lambda x: -(x[1] + x[2]))
+    names = [i[0] for i in items]
+    common = [i[1] for i in items]
+    parted = [i[2] for i in items]
+    import numpy as np
+    x = np.arange(len(names))
+    width = 0.38
+    fig, ax = plt.subplots(figsize=(8.5, 4.4))
+    ax.bar(x - width/2, common, width, label="Tabelas comuns", color="#2e7dd1")
+    ax.bar(x + width/2, parted, width, label="Particionadas", color="#1f3a68")
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, rotation=20, ha="right", fontsize=9)
+    ax.set_ylabel("GB")
+    ax.set_title("Tabelas comuns vs particionadas (por instancia)",
+                 fontsize=12, pad=14)
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(loc="upper right", fontsize=9)
+    fig.subplots_adjust(top=0.88, bottom=0.22, left=0.10, right=0.97)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=140, bbox_inches="tight", pad_inches=0.25)
+    plt.close(fig)
+    buf.seek(0)
+    return Image(buf, width=17 * cm, height=9 * cm)
+
+
+def _chart_top_global(report, top_n=15):
+    rows = []
+    for t in report.tables:
+        for tt in t.top_tabelas(20):
+            rows.append((t.instancia, f"{tt.owner}.{tt.table}",
+                         tt.partitioned, tt.total_gb))
+    if not rows:
+        return None
+    rows.sort(key=lambda r: -r[3])
+    rows = rows[:top_n]
+    rows.reverse()
+    labels = [f"{r[1]}  ({r[0]})" for r in rows]
+    sizes = [r[3] for r in rows]
+    cols = ["#1f3a68" if r[2] else "#2e7dd1" for r in rows]
+    fig, ax = plt.subplots(figsize=(8.5, max(4, 0.42 * len(rows) + 1)))
+    ax.barh(labels, sizes, color=cols)
+    ax.set_xlabel("GB")
+    ax.set_title(f"Top {top_n} maiores tabelas (todas as instancias)",
+                 fontsize=12, pad=14)
+    if sizes:
+        for i, v in enumerate(sizes):
+            ax.text(v + max(sizes)*0.01, i, f"{v:,.0f}",
+                    va="center", fontsize=8)
+    ax.grid(True, axis="x", alpha=0.3)
+    fig.subplots_adjust(top=0.92, bottom=0.10, left=0.42, right=0.97)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=140, bbox_inches="tight", pad_inches=0.25)
+    plt.close(fig)
+    buf.seek(0)
+    h_cm = min(16.0, 0.55 * len(rows) + 2.0)
+    return Image(buf, width=17 * cm, height=h_cm * cm)
+
+
+def _tables_summary_table(report):
+    rows = [["Instancia", "Qtd. tab.", "Qtd. part.",
+             "Tabelas (GB)", "Partic. (GB)", "Total (GB)"]]
+    items = [t for t in report.tables if t.tables or t.partitions]
+    items.sort(key=lambda t: -(t.total_tabelas_gb + t.total_particionadas_gb))
+    for ti in items:
+        rows.append([
+            ti.instancia, str(ti.qtd_tabelas), str(ti.qtd_particionadas),
+            _fmt_gb(ti.total_tabelas_gb), _fmt_gb(ti.total_particionadas_gb),
+            _fmt_gb(ti.total_tabelas_gb + ti.total_particionadas_gb),
+        ])
+    tbl = Table(rows, repeatRows=1,
+                colWidths=[3.5 * cm, 2.2 * cm, 2.2 * cm,
+                           3.0 * cm, 3.0 * cm, 3.0 * cm])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), PRIMARY),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, LIGHT_BG]),
+    ]))
+    return tbl
+
+
 # ---------------------------------------------------------------------------
 # Sections
 # ---------------------------------------------------------------------------
@@ -500,14 +588,42 @@ def build_pdf(report: CollectReport, output_path: str | Path,
     story.append(_backups_table(report))
     story.append(Spacer(1, 12))
 
+    # ---------- tabelas (somente se houver) ----------
+    if report.has_tables:
+        story.append(PageBreak())
+        story.append(Paragraph("7. Análise de Tabelas", st["H1Custom"]))
+        story.append(Paragraph(
+            "Comparativo de tabelas comuns versus tabelas particionadas por "
+            "instância e ranking global das maiores tabelas.",
+            st["BodyJustify"]))
+        story.append(Spacer(1, 6))
+        story.append(_tables_summary_table(report))
+        story.append(Spacer(1, 10))
+        ch = _chart_tables_compare(report)
+        if ch:
+            story.append(ch)
+        story.append(PageBreak())
+        story.append(Paragraph("Top maiores tabelas (ranking global)",
+                               st["H2Custom"] if "H2Custom" in st
+                               else st["H1Custom"]))
+        ch2 = _chart_top_global(report, top_n=15)
+        if ch2:
+            story.append(ch2)
+        story.append(Spacer(1, 12))
+        _section_n_riscos = "8"
+        _section_n_reco = "9"
+    else:
+        _section_n_riscos = "7"
+        _section_n_reco = "8"
+
     # ---------- riscos / alertas ----------
-    story.append(Paragraph("7. Riscos e Alertas", st["H1Custom"]))
+    story.append(Paragraph(f"{_section_n_riscos}. Riscos e Alertas", st["H1Custom"]))
     for item in _alertas_block(report):
         story.append(item)
     story.append(Spacer(1, 12))
 
     # ---------- recomendações ----------
-    story.append(Paragraph("8. Recomendações Técnicas", st["H1Custom"]))
+    story.append(Paragraph(f"{_section_n_reco}. Recomendações Técnicas", st["H1Custom"]))
     recos = []
     if crit_fs:
         mounts = ", ".join(f.mount for f in crit_fs)

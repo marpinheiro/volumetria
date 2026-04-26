@@ -147,10 +147,13 @@ kpi(c5, "Backups identificados", str(len(report.backups)),
 st.divider()
 
 # -------- tabs --------
-tab_dash, tab_fs, tab_inst, tab_proj, tab_bkp, tab_alert, tab_export = st.tabs(
-    ["📈 Dashboard", "💾 Filesystems", "🗄️ Instâncias", "🔮 Projeção",
-     "🛟 Backups", "⚠️ Alertas", "📄 Exportar PDF"],
-)
+_has_tables = report.has_tables
+_tab_labels = ["📈 Dashboard", "💾 Filesystems", "🗄️ Instâncias", "🔮 Projeção",
+               "🛟 Backups", "⚠️ Alertas",
+               ("🧮 Tabelas" if _has_tables else "🧮 Tabelas (sem dados)"),
+               "📄 Exportar PDF"]
+(tab_dash, tab_fs, tab_inst, tab_proj, tab_bkp, tab_alert,
+ tab_tables, tab_export) = st.tabs(_tab_labels)
 
 # === Dashboard ===
 with tab_dash:
@@ -484,7 +487,119 @@ with tab_alert:
                 st.markdown(f'<div class="alert-warn"><b>{a["nivel"]}</b> — {a["msg"]}</div>',
                             unsafe_allow_html=True)
 
-# === Export PDF ===
+# === Tabelas ===
+with tab_tables:
+    if not _has_tables:
+        st.info("ℹ️ A coleta enviada não contém a seção `####Tabelas####`. "
+                "A análise de tabelas ficará desabilitada — envie um arquivo "
+                "com o bloco de tabelas para habilitá-la.")
+    else:
+        st.markdown("### 🧮 Análise de Tabelas por Instância")
+        st.caption("Comparativo entre tabelas comuns e tabelas particionadas, "
+                   "consolidado por instância e ranking global das maiores tabelas.")
+
+        # Resumo por instância
+        resumo = pd.DataFrame([{
+            "Instância": t.instancia,
+            "Qtd. tabelas": t.qtd_tabelas,
+            "Qtd. particionadas": t.qtd_particionadas,
+            "Tabelas (GB)": round(t.total_tabelas_gb, 1),
+            "Particionadas (GB)": round(t.total_particionadas_gb, 1),
+            "Total (GB)": round(t.total_tabelas_gb + t.total_particionadas_gb, 1),
+        } for t in report.tables]).sort_values("Total (GB)", ascending=False)
+
+        st.markdown("#### Resumo por instância")
+        st.dataframe(resumo, width="stretch", hide_index=True)
+
+        # Gráfico comparativo geral (barras agrupadas)
+        st.markdown("#### Comparativo: tabelas comuns vs particionadas (por instância)")
+        df_cmp = resumo.melt(
+            id_vars=["Instância"],
+            value_vars=["Tabelas (GB)", "Particionadas (GB)"],
+            var_name="Tipo", value_name="GB",
+        )
+        fig = px.bar(df_cmp, x="Instância", y="GB", color="Tipo",
+                     barmode="group",
+                     color_discrete_map={"Tabelas (GB)": "#2e7dd1",
+                                         "Particionadas (GB)": "#1f3a68"})
+        fig.update_layout(height=420, margin=dict(l=10, r=10, t=50, b=40),
+                          legend=dict(orientation="h", y=1.12))
+        st.plotly_chart(fig, width="stretch")
+
+        # Detalhe por instância
+        st.markdown("#### Detalhe por instância")
+        sel_inst = st.selectbox(
+            "Instância", [t.instancia for t in report.tables], key="tab_inst_sel",
+        )
+        ti = next(t for t in report.tables if t.instancia == sel_inst)
+
+        c1, c2, c3, c4 = st.columns(4)
+        kpi(c1, "Tabelas comuns", str(ti.qtd_tabelas),
+            fmt_gb(ti.total_tabelas_gb))
+        kpi(c2, "Particionadas", str(ti.qtd_particionadas),
+            fmt_gb(ti.total_particionadas_gb))
+        kpi(c3, "Total tabelas", fmt_gb(ti.total_tabelas_gb + ti.total_particionadas_gb),
+            f"{ti.qtd_tabelas + ti.qtd_particionadas} objetos")
+        kpi(c4, "Partições mapeadas", str(len(ti.partitions)),
+            "linhas de partição")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            # Pizza: comuns vs particionadas
+            pie_df = pd.DataFrame({
+                "Tipo": ["Tabelas comuns", "Tabelas particionadas"],
+                "GB": [ti.total_tabelas_gb, ti.total_particionadas_gb],
+            })
+            pie_df = pie_df[pie_df["GB"] > 0]
+            if not pie_df.empty:
+                fig = px.pie(pie_df, names="Tipo", values="GB", hole=0.45,
+                             color="Tipo",
+                             color_discrete_map={"Tabelas comuns": "#2e7dd1",
+                                                 "Tabelas particionadas": "#1f3a68"})
+                fig.update_layout(height=360, margin=dict(l=10, r=10, t=40, b=10))
+                st.plotly_chart(fig, width="stretch")
+        with col_b:
+            # Top N maiores tabelas dessa instância
+            tops = ti.top_tabelas(10)
+            if tops:
+                df_top = pd.DataFrame([{
+                    "Tabela": f"{t.owner}.{t.table}",
+                    "Tipo": "Particionada" if t.partitioned else "Comum",
+                    "GB": round(t.total_gb, 1),
+                } for t in tops]).sort_values("GB")
+                fig = px.bar(df_top, x="GB", y="Tabela", color="Tipo",
+                             orientation="h",
+                             color_discrete_map={"Comum": "#2e7dd1",
+                                                 "Particionada": "#1f3a68"})
+                fig.update_layout(height=max(360, 32 * len(df_top)),
+                                  margin=dict(l=10, r=10, t=40, b=10),
+                                  legend=dict(orientation="h", y=1.12))
+                st.plotly_chart(fig, width="stretch")
+
+        # Ranking global das maiores tabelas
+        st.markdown("#### 🏆 Ranking global das maiores tabelas")
+        all_top = []
+        for t in report.tables:
+            for tt in t.top_tabelas(15):
+                all_top.append({
+                    "Instância": t.instancia,
+                    "Tabela": f"{tt.owner}.{tt.table}",
+                    "Tipo": "Particionada" if tt.partitioned else "Comum",
+                    "Linhas": tt.num_rows,
+                    "Tamanho (GB)": round(tt.total_gb, 1),
+                })
+        df_global = (pd.DataFrame(all_top)
+                     .sort_values("Tamanho (GB)", ascending=False)
+                     .head(20))
+        st.dataframe(df_global, width="stretch", hide_index=True)
+        fig = px.bar(df_global.sort_values("Tamanho (GB)"),
+                     x="Tamanho (GB)", y="Tabela", color="Instância",
+                     orientation="h",
+                     hover_data=["Tipo", "Linhas"])
+        fig.update_layout(height=600, margin=dict(l=10, r=10, t=50, b=10))
+        st.plotly_chart(fig, width="stretch")
+
+
 with tab_export:
     st.markdown("### Relatório executivo PDF")
     st.write("O PDF inclui resumo executivo, situação atual, projeções, "

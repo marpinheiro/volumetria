@@ -266,6 +266,98 @@ class Instance:
 
 
 @dataclass
+class TableEntry:
+    owner: str
+    table: str
+    tablespace: str = ""
+    partitioned: bool = False
+    part_count: int = 0
+    num_rows: int = 0
+    data_gb: float = 0.0
+    index_gb: float = 0.0
+    lob_gb: float = 0.0
+    total_gb: float = 0.0
+
+
+@dataclass
+class PartitionEntry:
+    owner: str
+    table: str
+    partition: str = ""
+    subpartition: str = ""
+    tablespace: str = ""
+    num_rows: int = 0
+    data_gb: float = 0.0
+    index_gb: float = 0.0
+    lob_gb: float = 0.0
+    total_gb: float = 0.0
+
+
+@dataclass
+class TablesInfo:
+    """Informações de tabelas e tabelas particionadas de uma instância."""
+    instancia: str = ""
+    tables: list[TableEntry] = field(default_factory=list)
+    partitions: list[PartitionEntry] = field(default_factory=list)
+
+    @property
+    def total_tabelas_gb(self) -> float:
+        # apenas tabelas comuns (não particionadas) — particionadas têm o tamanho real nas partitions
+        return sum(t.total_gb for t in self.tables if not t.partitioned)
+
+    @property
+    def total_particionadas_gb(self) -> float:
+        # soma das partições (mais preciso que TOTAL_GB da tabela base, que costuma vir 0)
+        soma_part = sum(p.total_gb for p in self.partitions)
+        if soma_part > 0:
+            return soma_part
+        return sum(t.total_gb for t in self.tables if t.partitioned)
+
+    @property
+    def qtd_tabelas(self) -> int:
+        return sum(1 for t in self.tables if not t.partitioned)
+
+    @property
+    def qtd_particionadas(self) -> int:
+        # nomes únicos de tabelas particionadas
+        nomes = {(t.owner, t.table) for t in self.tables if t.partitioned}
+        nomes |= {(p.owner, p.table) for p in self.partitions}
+        return len(nomes)
+
+    def top_tabelas(self, n: int = 10) -> list[TableEntry]:
+        """Top N tabelas (comuns ou particionadas) por tamanho.
+        Para particionadas, o tamanho real é somado das partições."""
+        # consolida particionadas
+        agg: dict[tuple[str, str], TableEntry] = {}
+        for t in self.tables:
+            agg[(t.owner, t.table)] = TableEntry(
+                owner=t.owner, table=t.table, tablespace=t.tablespace,
+                partitioned=t.partitioned, part_count=t.part_count,
+                num_rows=t.num_rows, data_gb=t.data_gb, index_gb=t.index_gb,
+                lob_gb=t.lob_gb, total_gb=t.total_gb,
+            )
+        # somar partições para particionadas
+        part_sums: dict[tuple[str, str], list[float]] = {}
+        for p in self.partitions:
+            k = (p.owner, p.table)
+            part_sums.setdefault(k, [0.0, 0.0, 0.0, 0.0])
+            part_sums[k][0] += p.data_gb
+            part_sums[k][1] += p.index_gb
+            part_sums[k][2] += p.lob_gb
+            part_sums[k][3] += p.total_gb
+        for k, sums in part_sums.items():
+            if k not in agg:
+                agg[k] = TableEntry(owner=k[0], table=k[1], partitioned=True)
+            agg[k].partitioned = True
+            if sums[3] > agg[k].total_gb:
+                agg[k].data_gb = sums[0]
+                agg[k].index_gb = sums[1]
+                agg[k].lob_gb = sums[2]
+                agg[k].total_gb = sums[3]
+        return sorted(agg.values(), key=lambda x: -x.total_gb)[:n]
+
+
+@dataclass
 class Backup:
     tipo: str = ""
     diretorio: str = ""
@@ -283,14 +375,21 @@ class CollectReport:
     asm: list[ASMDiskGroup] = field(default_factory=list)
     instances: list[Instance] = field(default_factory=list)
     backups: list[Backup] = field(default_factory=list)
+    tables: list[TablesInfo] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+    @property
+    def has_tables(self) -> bool:
+        return any(t.tables or t.partitions for t in self.tables)
 
 
 # ---------------------------------------------------------------------------
 # Section splitting
 # ---------------------------------------------------------------------------
 
-_SECTION_HEADER = re.compile(r"^#{4,}\s*(SERVIDOR|BANCO|BACKUP[´'`]?S?)\s*#{0,}", re.I)
+_SECTION_HEADER = re.compile(
+    r"^#{4,}\s*(SERVIDOR|BANCO|BACKUP[´'`]?S?|TABELAS?)\s*#{0,}", re.I,
+)
 
 
 def split_sections(text: str) -> list[tuple[str, list[str]]]:
@@ -307,6 +406,8 @@ def split_sections(text: str) -> list[tuple[str, list[str]]]:
             kind = m.group(1).upper()
             if kind.startswith("BACKUP"):
                 kind = "BACKUPS"
+            elif kind.startswith("TABELA"):
+                kind = "TABELAS"
             current_type = kind
             current_lines = []
         else:
@@ -663,6 +764,130 @@ def relate_backups(report: CollectReport) -> None:
 
 
 # ---------------------------------------------------------------------------
+# TABELAS
+# ---------------------------------------------------------------------------
+
+_INSTANCIA_HEADER_RE = re.compile(r"^Inst[aâ]ncias?\s*:\s*(\S+)", re.I)
+
+
+def _to_float(token: str) -> float:
+    if token is None:
+        return 0.0
+    t = token.strip().replace(",", "")
+    if not t or t == "-":
+        return 0.0
+    try:
+        return float(t)
+    except ValueError:
+        return 0.0
+
+
+def _to_int(token: str) -> int:
+    if token is None:
+        return 0
+    t = token.strip().replace(",", "")
+    if not t or t == "-":
+        return 0
+    try:
+        return int(float(t))
+    except ValueError:
+        return 0
+
+
+def _split_pipe(line: str) -> list[str]:
+    return [c.strip() for c in line.split("|")]
+
+
+def parse_tabelas_block(lines: list[str]) -> list[TablesInfo]:
+    """Parse da seção #### Tabelas ####.
+    Loop: 'Instâncias:nome' → 'tamanho_tabelas:' → header + linhas →
+          'tamanho_tabelas_particionadas:' → header + linhas.
+    """
+    out: list[TablesInfo] = []
+    current: Optional[TablesInfo] = None
+    mode: Optional[str] = None
+    skip_header = False
+
+    for raw in lines:
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        m = _INSTANCIA_HEADER_RE.match(stripped)
+        if m:
+            if current is not None:
+                out.append(current)
+            current = TablesInfo(instancia=m.group(1).strip())
+            mode = None
+            skip_header = False
+            continue
+        if current is None:
+            continue
+        low = stripped.lower()
+        if low.startswith("tamanho_tabelas_particionad"):
+            mode = "partitions"
+            skip_header = True
+            continue
+        if low.startswith("tamanho_tabelas"):
+            mode = "tables"
+            skip_header = True
+            continue
+        if "|" not in stripped:
+            continue
+        cols = _split_pipe(stripped)
+        if skip_header:
+            joined = " ".join(cols).upper()
+            if "OWNER" in joined or "TABLE_NAME" in joined:
+                skip_header = False
+                continue
+            skip_header = False
+        if mode == "tables" and len(cols) >= 11:
+            try:
+                current.tables.append(TableEntry(
+                    owner=cols[0], table=cols[1], tablespace=cols[2],
+                    partitioned=cols[3].upper().startswith(
+                        ("Y", "S", "RANGE", "LIST", "HASH")),
+                    part_count=_to_int(cols[4]),
+                    num_rows=_to_int(cols[6]),
+                    data_gb=_to_float(cols[7]),
+                    index_gb=_to_float(cols[8]),
+                    lob_gb=_to_float(cols[9]),
+                    total_gb=_to_float(cols[10]),
+                ))
+            except Exception:
+                pass
+        elif mode == "partitions" and len(cols) >= 12:
+            try:
+                current.partitions.append(PartitionEntry(
+                    owner=cols[0], table=cols[1], partition=cols[2],
+                    subpartition=cols[4], tablespace=cols[6],
+                    num_rows=_to_int(cols[7]),
+                    data_gb=_to_float(cols[8]),
+                    index_gb=_to_float(cols[9]),
+                    lob_gb=_to_float(cols[10]),
+                    total_gb=_to_float(cols[11]),
+                ))
+            except Exception:
+                pass
+    if current is not None:
+        out.append(current)
+    return out
+
+
+def relate_tables(report: CollectReport) -> None:
+    """Casa o nome de instância de TablesInfo com a Instance correspondente."""
+    inst_names = [i.nome for i in report.instances if i.nome]
+    for ti in report.tables:
+        if not ti.instancia:
+            continue
+        target = ti.instancia.lower()
+        for nome in inst_names:
+            n = nome.lower()
+            if n == target or n.startswith(target) or target.startswith(n):
+                ti.instancia = nome
+                break
+
+
+# ---------------------------------------------------------------------------
 # Top-level API
 # ---------------------------------------------------------------------------
 
@@ -688,7 +913,10 @@ def parse_collect(path: str | Path) -> CollectReport:
                 report.instances.append(inst)
         elif kind == "BACKUPS":
             report.backups.extend(parse_backups_block(block_lines))
+        elif kind == "TABELAS":
+            report.tables.extend(parse_tabelas_block(block_lines))
     relate_backups(report)
+    relate_tables(report)
     return report
 
 
